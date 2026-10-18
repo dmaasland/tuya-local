@@ -3,6 +3,8 @@ products:
   - id: 8zrzjldq07tlxnlv
     manufacturer: Mypin
     model: 6L
+  - id: bzdyy9oauokn8gam
+    manufacturer: Gologi
 entities:
   - entity: switch
     translation_key: camera_record
