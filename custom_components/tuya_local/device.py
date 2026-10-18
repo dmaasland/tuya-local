@@ -33,32 +33,6 @@ from .helpers.log import log_json
 
 _LOGGER = logging.getLogger(__name__)
 
-# device22 devices only return dps that are explicitly requested. When
-# tinytuya auto-detects device22 it only requests dp 1, so devices without
-# dp 1 return nothing. Most switch-like devices have dp 1. Lights generally
-# start from 20. 101 is where vendor specific dps start. 148 covers a doorbell
-# device that didn't have these, 201 covers remote controllers and 2 and 9
-# cover others without 1.
-DEVICE22_PROBE_DPS = {
-    "1": None,
-    "2": None,
-    "9": None,
-    "20": None,
-    "60": None,
-    "101": None,
-    "148": None,
-    "201": None,
-}
-
-
-def _is_device22_reply(retval):
-    """Return True if the device asked for the device22 protocol variant.
-
-    With auto-detect disabled, tinytuya reports this reply as error 900.
-    """
-    return isinstance(retval, dict) and "data unvalid" in str(retval.get("Payload", ""))
-
-
 # Extra context for tinytuya error codes whose message does not fully describe
 # the possible causes.  Error 914 in particular is reported for any failure to
 # negotiate a session, which includes a device that is refusing connections
@@ -406,7 +380,7 @@ class TuyaLocalDevice(object):
                         dps_updated = True
                     else:
                         poll = await self._retry_on_failed_connection(
-                            lambda: self._api.status(),
+                            lambda: self._status_patched(),
                             f"Failed to fetch device status for {self.name}",
                         )
                         dps_updated = False
@@ -502,9 +476,24 @@ class TuyaLocalDevice(object):
     async def async_possible_types(self):
         cached_state = self._get_cached_state()
         if len(cached_state) <= 1:
-            # device22 devices need to be polled with a dp that exists on
-            # the device to get anything back, see DEVICE22_PROBE_DPS.
-            self._api.set_dpsUsed(dict(DEVICE22_PROBE_DPS))
+            # in case of device22 devices, we need to poll them with a dp
+            # that exists on the device to get anything back.  Most switch-like
+            # devices have dp 1. Lights generally start from 20.  101 is where
+            # vendor specific dps start.  Between them, these three should cover
+            # most devices.  148 covers a doorbell device that didn't have these
+            # 201 covers remote controllers and 2 and 9 cover others without 1
+            self._api.set_dpsUsed(
+                {
+                    "1": None,
+                    "2": None,
+                    "9": None,
+                    "20": None,
+                    "60": None,
+                    "101": None,
+                    "148": None,
+                    "201": None,
+                }
+            )
             await self.async_refresh()
             cached_state = self._get_cached_state()
 
@@ -572,32 +561,26 @@ class TuyaLocalDevice(object):
         self._last_connection = 0
         self._last_full_poll = 0
 
-    def _needs_device22_probe(self, state):
-        """Return True if a device22 device returned nothing for the default dp 1."""
-        return (
+    def _status_patched(self):
+        # local patch: feeder has no dp 1, ask for its readable dps instead.
+        # Never request 111: the feeder formats the SD card when asked for it.
+        state = self._api.status()
+        if (
             self._api.dev_type == "device22"
             and self._api.dps_to_request == {"1": None}
             and not (isinstance(state, dict) and state.get("dps"))
-        )
+        ):
+            self._api.set_dpsUsed(
+                {
+                    k: None
+                    for k in ("101", "104", "108", "109", "110", "117", "150", "151")
+                }
+            )
+            state = self._api.status()
+        return state
 
     def _refresh_cached_state(self):
-        new_state = self._api.status()
-        if _is_device22_reply(new_state) and self._api.dev_type != "device22":
-            # Switch to device22 here with the probe dps, instead of letting
-            # auto detection rotate to 3.2. For 3.2, tinytuya requests every dp
-            # it can find, and some devices run button dps (such as SD card
-            # format) when they are requested.
-            _LOGGER.debug("%s asked for device22, switching", self.name)
-            self._api.dev_type = "device22"
-            self._api.set_dpsUsed(dict(DEVICE22_PROBE_DPS))
-            new_state = self._api.status()
-        elif self._needs_device22_probe(new_state):
-            _LOGGER.debug(
-                "%s device22 returned no state for dp 1, probing more dps",
-                self.name,
-            )
-            self._api.set_dpsUsed(dict(DEVICE22_PROBE_DPS))
-            new_state = self._api.status()
+        new_state = self._status_patched()
         if new_state:
             if "Err" not in new_state:
                 self._cached_state = self._cached_state | new_state.get("dps", {})
@@ -728,7 +711,7 @@ class TuyaLocalDevice(object):
                     if isinstance(retval, dict) and "Error" in retval:
                         last_err_code = retval.get("Err")
                         last_err_msg = retval.get("Error")
-                        if last_err_code == "900" and not _is_device22_reply(retval):
+                        if last_err_code == "900":
                             # Some devices (e.g. IR/RF remotes) never return
                             # status data; error 900 is their normal response
                             # to a status query. Treat as reachable with no
