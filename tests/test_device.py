@@ -432,13 +432,13 @@ def test_refresh_cached_state_does_not_probe_default_devices(subject, mock_api):
     api.status.assert_called_once()
 
 
-@pytest.mark.asyncio
-async def test_refresh_rotates_protocol_on_device22_reply(subject, mock_api, mocker):
+def test_refresh_cached_state_switches_to_device22_on_reply(subject, mock_api):
     # With auto-detect disabled, tinytuya reports the device22 reply as
-    # error 900. Auto detection must not stop at this protocol version.
-    subject._api_protocol_version_index = None
-    subject._api_protocol_working = False
-    mock_api().status.side_effect = [
+    # error 900. Switch to device22 with the probe dps on the same version.
+    api = mock_api()
+    api.dev_type = "default"
+    api.dps_to_request = {}
+    api.status.side_effect = [
         {
             "Error": "Invalid JSON Response from Device",
             "Err": "900",
@@ -446,10 +446,30 @@ async def test_refresh_rotates_protocol_on_device22_reply(subject, mock_api, moc
         },
         {"dps": {"101": False}},
     ]
+    subject._cached_state = {"updated_at": 0}
+
+    subject._refresh_cached_state()
+
+    assert api.dev_type == "device22"
+    api.set_dpsUsed.assert_called_once_with(DEVICE22_PROBE_DPS)
+    assert subject._cached_state["101"] is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_does_not_accept_device22_reply_as_state(subject, mock_api):
+    # If the device still asks for device22, error 900 must not count as
+    # a working connection.
+    subject._api_protocol_version_index = None
+    subject._api_protocol_working = False
+    reply = {
+        "Error": "Invalid JSON Response from Device",
+        "Err": "900",
+        "Payload": "json obj data unvalid",
+    }
+    mock_api().status.side_effect = [reply, reply, {"dps": {"101": False}}]
 
     await subject.async_refresh()
 
-    mock_api().set_version.assert_has_calls([mocker.call(3.3), mocker.call(3.1)])
     assert subject._cached_state["101"] is False
 
 
