@@ -54,11 +54,9 @@ DEVICE22_PROBE_DPS = {
 def _is_device22_reply(retval):
     """Return True if the device asked for the device22 protocol variant.
 
-    With auto-detect disabled, tinytuya reports this reply as error 900. It
-    means that the protocol version is not usable as configured, so auto
-    detection must continue to other versions.
+    With auto-detect disabled, tinytuya reports this reply as error 900.
     """
-    return "data unvalid" in str(retval.get("Payload", ""))
+    return isinstance(retval, dict) and "data unvalid" in str(retval.get("Payload", ""))
 
 
 # Extra context for tinytuya error codes whose message does not fully describe
@@ -584,7 +582,16 @@ class TuyaLocalDevice(object):
 
     def _refresh_cached_state(self):
         new_state = self._api.status()
-        if self._needs_device22_probe(new_state):
+        if _is_device22_reply(new_state) and self._api.dev_type != "device22":
+            # Switch to device22 here with the probe dps, instead of letting
+            # auto detection rotate to 3.2. For 3.2, tinytuya requests every dp
+            # it can find, and some devices run button dps (such as SD card
+            # format) when they are requested.
+            _LOGGER.debug("%s asked for device22, switching", self.name)
+            self._api.dev_type = "device22"
+            self._api.set_dpsUsed(dict(DEVICE22_PROBE_DPS))
+            new_state = self._api.status()
+        elif self._needs_device22_probe(new_state):
             _LOGGER.debug(
                 "%s device22 returned no state for dp 1, probing more dps",
                 self.name,
