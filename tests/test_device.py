@@ -6,7 +6,11 @@ import pytest
 
 # from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
 from custom_components.tuya_local.const import CONF_DEVICE_ID, DOMAIN
-from custom_components.tuya_local.device import TuyaLocalDevice, async_delete_device
+from custom_components.tuya_local.device import (
+    DEVICE22_PROBE_DPS,
+    TuyaLocalDevice,
+    async_delete_device,
+)
 
 from .const import EUROM_600_HEATER_PAYLOAD
 
@@ -380,6 +384,87 @@ def test_refresh_cached_state(subject, mock_api):
     assert subject._cached_state == {"1": "CHANGED"} | subject._cached_state
     # Did it update the timestamp on the cached state?
     assert subject._cached_state["updated_at"] == pytest.approx(time(), abs=2)
+
+
+def test_refresh_cached_state_probes_device22_without_dp1(subject, mock_api):
+    # tinytuya auto-detected device22 and only requests dp 1,
+    # which this device does not have
+    api = mock_api()
+    api.dev_type = "device22"
+    api.dps_to_request = {"1": None}
+
+    def set_dps(dps):
+        api.dps_to_request = dps
+
+    api.set_dpsUsed.side_effect = set_dps
+    api.status.side_effect = [None, {"dps": {"101": False}}]
+    subject._cached_state = {"updated_at": 0}
+
+    subject._refresh_cached_state()
+
+    api.set_dpsUsed.assert_called_once_with(DEVICE22_PROBE_DPS)
+    assert api.status.call_count == 2
+    assert subject._cached_state["101"] is False
+    assert subject.has_returned_state
+
+
+def test_refresh_cached_state_does_not_probe_when_dp1_answers(subject, mock_api):
+    api = mock_api()
+    api.dev_type = "device22"
+    api.dps_to_request = {"1": None}
+    api.status.return_value = {"dps": {"1": True}}
+
+    subject._refresh_cached_state()
+
+    api.set_dpsUsed.assert_not_called()
+    api.status.assert_called_once()
+
+
+def test_refresh_cached_state_does_not_probe_default_devices(subject, mock_api):
+    api = mock_api()
+    api.dev_type = "default"
+    api.dps_to_request = {"1": None}
+    api.status.return_value = None
+
+    subject._refresh_cached_state()
+
+    api.set_dpsUsed.assert_not_called()
+    api.status.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_refresh_rotates_protocol_on_device22_reply(subject, mock_api, mocker):
+    # With auto-detect disabled, tinytuya reports the device22 reply as
+    # error 900. Auto detection must not stop at this protocol version.
+    subject._api_protocol_version_index = None
+    subject._api_protocol_working = False
+    mock_api().status.side_effect = [
+        {
+            "Error": "Invalid JSON Response from Device",
+            "Err": "900",
+            "Payload": "json obj data unvalid",
+        },
+        {"dps": {"101": False}},
+    ]
+
+    await subject.async_refresh()
+
+    mock_api().set_version.assert_has_calls([mocker.call(3.3), mocker.call(3.1)])
+    assert subject._cached_state["101"] is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_treats_other_900_errors_as_reachable(subject, mock_api):
+    mock_api().status.return_value = {
+        "Error": "Invalid JSON Response from Device",
+        "Err": "900",
+        "Payload": "",
+    }
+
+    await subject.async_refresh()
+
+    mock_api().status.assert_called_once()
+    assert subject.has_returned_state
 
 
 def test_set_values(subject, mock_api):
